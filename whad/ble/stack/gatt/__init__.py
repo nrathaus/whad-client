@@ -1,6 +1,7 @@
 """GATT Server and Client implementation
 """
 import logging
+from typing import Optional, List
 
 from time import time
 from queue import Queue, Empty
@@ -19,9 +20,9 @@ from whad.ble.stack.gatt.message import *
 from whad.ble.stack.gatt.exceptions import GattTimeoutException
 from whad.ble.profile import GenericProfile
 from whad.ble.stack.smp import Pairing
-from whad.ble.profile.characteristic import Characteristic, CharacteristicDescriptor, ClientCharacteristicConfig, CharacteristicValue
-from whad.ble.profile.service import PrimaryService, SecondaryService, IncludeService
-
+from whad.ble.profile.characteristic import Characteristic, Descriptor, ClientCharacteristicConfig, CharacteristicValue
+from whad.ble.profile.service import Service, PrimaryService, SecondaryService, IncludeService
+from whad.exceptions import WhadDeviceDisconnected
 from whad.common.stack import Layer, source, alias
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ def proclock(f):
         except GattTimeoutException as err:
             self.procedure_stop()
             raise err
-        
+
         # Release GATT procedure lock
         self.procedure_stop()
         return result
@@ -633,7 +634,7 @@ class GattClient(GattLayer):
         if isinstance(msg, GattFindByTypeValueResponse):
             for item in msg:
                 return PrimaryService(
-                    uuid=None,
+                    uuid=uuid,
                     handle=item.handle,
                     end_handle=item.end
                 )
@@ -644,13 +645,13 @@ class GattClient(GattLayer):
                 raise error_response_to_exc(msg.reason, msg.request, msg.handle)
 
     @proclock
-    def discover_primary_services(self):
+    def discover_primary_services(self, start: int = 1):
         """Discover remote Primary Services.
 
         This function will yield every discovered primary service.
         """
         # List primary services handles
-        handle = 1
+        handle = start
         while True:
             # Send a Read By Group Type Request
             self.lock_tx()
@@ -665,7 +666,7 @@ class GattClient(GattLayer):
             if isinstance(msg, GattReadByGroupTypeResponse):
                 for item in msg:
                     yield PrimaryService(
-                        uuid=UUID(item.value),
+                        UUID(item.value),
                         handle=item.handle,
                         end_handle=item.end
                     )
@@ -718,16 +719,31 @@ class GattClient(GattLayer):
                     error_response_to_exc(msg.reason, msg.request, msg.handle)
 
     @proclock
-    def discover_characteristics(self, service, save_values: bool = False):
+    def discover_characteristics(self, service: Service, save_values: bool = False, start: Optional[int] = None):
         """
-        Discover service characteristics
+        Discover a given service's characteristics and automatically add them to the specified service object.
+
+        Discovered characteristics are also yielded by this method, providing a way to determine what characteristics
+        have been discovered.
+
+        :param service: Service to discover
+        :type  service: Service
+        :param save_values: When set to `True`, will read the discovered characteristics' values and save them
+        :type  save_values: bool, optional
+        :param start: If set, discover characteristics with handle in range [`start`, 0xFFFF]
+        :type  start: int, optional
+        :return: Iterator for discovered characteristics enumeration
+        :rtype: Iterator[Characteristic]
         """
         logger.debug("discover characteristics for service %s", service.uuid)
-        logger.debug("discover characteristics from handle %d to %d", 
+        logger.debug("discover characteristics from handle %d to %d",
             service.handle, service.end_handle
         )
-        if isinstance(service, PrimaryService):
-            handle = service.handle
+        if isinstance(service, Service):
+            if start is not None:
+                handle = start
+            else:
+                handle = service.handle
         else:
             return
 
@@ -750,18 +766,22 @@ class GattClient(GattLayer):
                     charac_value_handle = unpack('<H', item.value[1:3])[0]
                     charac_uuid = UUID(item.value[3:])
                     charac = Characteristic(
+                        handle=charac_handle,
                         uuid=charac_uuid,
                         properties=charac_properties
                     )
-                    charac.handle = charac_handle
                     charac.value_handle = charac_value_handle
+                    charac.service = service
+
+                    # Add characteristic as soon as we discovered it and set its value
+                    service.add_characteristic(charac)
 
                     # Read value if requested and characteristic is readable
                     if save_values and (charac_properties & 0x02) > 0:
                         try:
                             charac.value = self.read(charac_value_handle)
                         except (AttError, GattTimeoutException):
-                            charac.value = b""
+                            charac.value = None
 
                     handle = charac.handle+2
                     logger.debug("found characteristic %s with handle %d", charac_uuid, charac_value_handle)
@@ -805,8 +825,40 @@ class GattClient(GattLayer):
                         error_response_to_exc(msg.reason, msg.request, msg.handle)
 
                 handle += 1
+    @proclock
+    def read_characteristic_by_uuid(self, uuid: UUID, start: int = 1, end: int = 0xffff) -> Optional[List[CharacteristicValue]]:
+        """Read a characteristic by its UUID.
 
-    def get_descriptor(self, characteristic: Characteristic, uuid: UUID, handle: int) -> CharacteristicDescriptor:
+        :param UUID uuid: Characteristic UUID
+        :return: Characteristic if characteristic has been found, None otherwise
+        """
+        output = []
+
+        if uuid.type == UUID.TYPE_16:
+            self.lock_tx()
+            self.att.read_by_type_request(start, end, uuid.packed)
+            self.unlock_tx()
+        elif uuid.type == UUID.TYPE_128:
+            uuid1 = uuid.packed[0:4]
+            uuid2 = uuid.packed[4:8]
+            self.lock_tx()
+            self.att.read_by_type_request_128(start, end, uuid1, uuid2)
+            self.unlock_tx()
+
+        msg = self.wait_for_message(GattReadByTypeResponse)
+        if isinstance(msg, GattReadByTypeResponse):
+            for item in msg:
+                output.append(CharacteristicValue(uuid, item.handle, item.value))
+        elif isinstance(msg, GattErrorResponse):
+            if msg.reason == AttErrorCode.ATTR_NOT_FOUND:
+                return None
+            else:
+                raise error_response_to_exc(msg.reason, msg.request, msg.handle)
+
+        # Return found characteristic values
+        return output
+
+    def get_descriptor(self, characteristic: Characteristic, uuid: UUID, handle: int) -> Descriptor:
         """Read a characteristic descriptor identified by its handle.
 
         @param handle: Descriptor handle
@@ -818,28 +870,53 @@ class GattClient(GattLayer):
         desc_value = self.read(handle)
 
         # Return descriptor object based on value and UUID
-        return CharacteristicDescriptor.from_uuid(characteristic, handle,
+        return Descriptor.from_uuid(characteristic, handle,
                                                       uuid, desc_value)
 
     def discover(self, save_values: bool = False):
+        """Discover device services, characteristics and descriptors.
+
+        This method performs a GATT server discovery procedure, in three distinct steps:
+
+        1. Enumerate all primary services,
+        2. For each service, enumerate all its characteristics and read values if needed
+        3. For each characteristic, enumerate all its descriptors
+
+        :param save_values: If `True`, save every characteristic's value in the generated profile
+        :type  save_values: bool
+        """
         # Discover services
         services = []
         for service in self.discover_primary_services():
             services.append(service)
 
-        for service in services:
-            for characteristic in self.discover_characteristics(service, save_values=save_values):
-                service.add_characteristic(characteristic)
+            # Add service into model
             self.__model.add_service(service)
 
+
+        # Discover characteristics for each service, skipping already discovered services
+        for service in services:
+            # Enumerating characteristics
+            for characteristic in self.discover_characteristics(service, save_values=save_values):
+                    logger.debug("found new characteristic %s with handle %s", characteristic.uuid,
+                                 characteristic.handle)
+
+            # Update service into model
+            self.__model.add_service(service)
+
+
         # Searching for descriptors
-        for service in self.__model.services():
+        for service in services:
             for characteristic in service.characteristics():
                 for descriptor in self.discover_characteristic_descriptors(characteristic):
                     try:
                         desc = self.get_descriptor(characteristic, descriptor.uuid, descriptor.handle)
                         if desc is not None:
+                            # Add descriptor to characteristic
                             characteristic.add_descriptor(desc)
+
+                            # Update model: register descriptor into the model's attribute database
+                            self.__model.register_attribute(desc)
                     except (InsufficientAuthenticationError, InsufficientAuthorizationError, InsufficientEncryptionError):
                         pass
 
@@ -1005,35 +1082,59 @@ class GattClient(GattLayer):
             raise error_response_to_exc(msg.reason, msg.request, msg.handle)
 
     @proclock
-    def read_characteristic_by_uuid(self, uuid, start=1, end=0xFFFF):
-        """Read a characteristic given its UUID if its handle is comprised in a given range.
+    def find_characteristics_by_uuid(self, uuid, start=1, end=0xFFFF) -> List[Characteristic]:
+        """Find a characteristic given its UUID if its handle is comprised in a given range.
 
         :param UUID uuid: Characteristic UUID
         :param int start: Start handle value
         :param int end: End handle value
         """
-        if uuid.type == UUID.TYPE_16:
-            self.att.read_by_type_request(start, end, uuid.value())
-        elif uuid.type == UUID.TYPE_128:
-            # Required by scapy
-            uuid1 = unpack('<Q', uuid.packed[:8])[0]
-            uuid2 = unpack('<Q', uuid.packed[8:])[0]
-
+        output = []
+        handle = start
+        while handle <= end:
             self.lock_tx()
-            self.att.read_by_type_request_128bit(start, end, uuid1, uuid2)
+            self.att.read_by_type_request(
+                handle,
+                end,
+                0x2803
+            )
             self.unlock_tx()
 
-        msg = self.wait_for_message(GattReadByTypeResponse)
-        if isinstance(msg, GattReadByTypeResponse):
-            output = []
-            for item in msg:
-                output.append(item.value)
-            if len(output) == 1:
-                return output[0]
-            else:
-                return output
-        elif isinstance(msg, GattErrorResponse):
-            raise error_response_to_exc(msg.reason, msg.request, msg.handle)
+            msg = self.wait_for_message(GattReadByTypeResponse)
+            if isinstance(msg, GattReadByTypeResponse):
+                for item in msg:
+                    # Retrieve characteristic handle and UUID
+                    charac_handle = item.handle
+                    charac_uuid = UUID(item.value[3:])
+
+                    # If characteristic has been found, add it to our output
+                    if charac_uuid == uuid:
+                        # Parse remaining fields
+                        charac_properties = item.value[0]
+                        charac_value_handle = unpack('<H', item.value[1:3])[0]
+
+                        # Create a new Characteristic object
+                        charac = Characteristic(
+                            handle=charac_handle,
+                            uuid=charac_uuid,
+                            properties=charac_properties
+                        )
+                        charac.value_handle = charac_value_handle
+
+                        # Add to our found characteristics
+                        output.append(charac)
+
+                    handle = charac_handle+2
+
+
+            elif isinstance(msg, GattErrorResponse):
+                if msg.reason == AttErrorCode.ATTR_NOT_FOUND:
+                    break
+                else:
+                    error_response_to_exc(msg.reason, msg.request, msg.handle)
+
+        # Return found characteristic(s)
+        return output
 
     @proclock
     def set_mtu(self, mtu):
@@ -1065,7 +1166,7 @@ class GattClient(GattLayer):
                 raise error_response_to_exc(msg.reason, msg.request, msg.handle)
         else:
             return None
-        
+
     def on_mtu_changed(self, mtu):
         """MTU has changed, notify client.
         """
@@ -1320,7 +1421,7 @@ class GattServer(GattLayer):
 
                 # If attribute is a characteristic value or a descriptor, we make sure the characteristic
                 # is readable before matching its value with the request value
-                if isinstance(attr, CharacteristicValue) or isinstance(attr, CharacteristicDescriptor):
+                if isinstance(attr, CharacteristicValue) or isinstance(attr, Descriptor):
                     # Find characteristic end handle
                     if attr.value == request.attr_data:
                         matching_attrs.append((handle, attr.characteristic.end_handle))
@@ -1490,7 +1591,7 @@ class GattServer(GattLayer):
                 self.att.read_response(
                     attr.payload()
                 )
-            elif isinstance(attr, CharacteristicDescriptor):
+            elif isinstance(attr, Descriptor):
                 # Make sure the returned value matches the boundaries
                 self.att.read_response(
                     attr.value[:local_mtu - 1]
@@ -1617,7 +1718,7 @@ class GattServer(GattLayer):
                             gatt_error.handle if gatt_error.handle is not None else request.handle,
                             gatt_error.error if gatt_error.error is not None else BleAttErrorCode.ATTRIBUTE_NOT_FOUND
                         )
-                elif isinstance(attr, CharacteristicDescriptor):
+                elif isinstance(attr, Descriptor):
                     # Valid offset, return data[offset:offset + MTU - 1]
                     self.att.read_blob_response(
                         attr.value[request.offset:request.offset + local_mtu - 1]

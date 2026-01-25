@@ -526,10 +526,13 @@ class BleCentralShell(InteractiveShell):
                 try:
                     self.__target.discover()
                 except GattTimeoutException:
-                    self.error("GATT timeout occured")
+                    self.error("GATT timeout occurred")
                     return
                 except ConnectionLostException:
                     self.error("Services discovery failed (peripheral disconnected)")
+                    return
+                except AttError:
+                    self.error("ATT error, stopping discovery")
                     return
 
             # Cache our target with its discovered services/characteristics
@@ -589,7 +592,7 @@ class BleCentralShell(InteractiveShell):
                     self.__target.discover()
                     self.__cache.mark_as_discovered(self.__target_bd)
                 except GattTimeoutException:
-                    self.error("GATT timeout occured")
+                    self.error("GATT timeout occurred")
                     return
                 except ConnectionLostException:
                     self.error((
@@ -625,7 +628,7 @@ class BleCentralShell(InteractiveShell):
                     self.__target.discover()
                     self.__cache.mark_as_discovered(self.__target_bd)
                 except GattTimeoutException:
-                    self.error("GATT timeout occured")
+                    self.error("GATT timeout occurred")
                     return
                 except ConnectionLostException:
                     self.error((
@@ -747,7 +750,7 @@ class BleCentralShell(InteractiveShell):
                     self.__cache.mark_as_discovered(self.__target_bd)
 
                 # Search characteristic from its UUID
-                target_charac = self.__target.find_characteristic_by_uuid(handle)
+                target_charac = self.__target.char(handle)
                 if target_charac is not None:
                     try:
                         # Read data
@@ -838,7 +841,7 @@ class BleCentralShell(InteractiveShell):
                 self.__cache.mark_as_discovered(self.__target_bd)
 
             # Search characteristic from its UUID
-            target_charac = self.__target.find_characteristic_by_uuid(handle)
+            target_charac = self.__target.char(handle)
             if target_charac is not None:
                 try:
                     if without_response:
@@ -931,7 +934,7 @@ class BleCentralShell(InteractiveShell):
                         conn_handle=self.__target.conn_handle
                     )
                     if not res:
-                        self.error("An error occured while sending PDU.")
+                        self.error("An error occurred while sending PDU.")
                 else:
                     self.error('Invalid hex value.')
             except ValueError:
@@ -1031,7 +1034,7 @@ class BleCentralShell(InteractiveShell):
                         conn_handle=self.__target.conn_handle
                     )
                     if not res:
-                        self.error("An error occured while sending PDU.")
+                        self.error("An error occurred while sending PDU.")
                 else:
                     self.error("Invalid hex value.")
 
@@ -1039,7 +1042,7 @@ class BleCentralShell(InteractiveShell):
                 self.error("Sending PDU failed (peripheral disconnected)")
 
             except Exception:
-                self.error("An error occured while assembling packet")
+                self.error("An error occurred while assembling packet")
         else:
             self.error("No device connected.")
 

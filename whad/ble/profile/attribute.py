@@ -1,6 +1,6 @@
 """BLE Attribute
 """
-from typing import Optional
+from typing import Optional, List, Type, Tuple
 from struct import pack, unpack
 
 from whad.ble.exceptions import InvalidHandleValueException, InvalidUUIDException
@@ -604,7 +604,8 @@ class UUID:
 class Attribute:
     """GATT Attribute model
     """
-    def __init__(self, uuid, handle=None, value=0):
+
+    def __init__(self, uuid: UUID, handle: int = 0, value: bytes = b''):
         """Instantiate a GATT Attribute
         """
         self.__uuid = uuid
@@ -622,37 +623,53 @@ class Attribute:
         return self.__value
 
     @property
-    def value(self):
+    def value(self) -> bytes:
         """Attribute value
         """
         return self.__value
 
     @value.setter
-    def value(self, value):
+    def value(self, value: bytes):
         """Set attribute value
         """
         self.__value = value
 
     @property
-    def handle(self):
+    def handle(self) -> int:
         """Attribute handle
         """
         return self.__handle
 
     @handle.setter
-    def handle(self, new_handle):
+    def handle(self, new_handle: int):
         """Set attribute handle
         """
         if isinstance(new_handle, int):
             self.__handle = new_handle
-        else:
-            raise InvalidHandleValueException
 
     @property
-    def type_uuid(self):
+    def type_uuid(self) -> UUID:
         """Attribute type UUID
         """
         return self.__uuid
+
+    def inspect(self, *classes: Type['Attribute']) -> List[Tuple[str, 'Attribute']]:
+        """Inspect attribute class and return a list of attributes
+        that match the expected class or classes."""
+        attributes = []
+        for name in dir(self):
+            # Exclude special attributes
+            if name.startswith('_'):
+                continue
+
+            # Retrieve attribute and check if its class matches
+            attr = getattr(self, name)
+            for match in classes:
+                if isinstance(attr, match):
+                    attributes.append((name, attr))
+
+        # Return found attributes
+        return attributes
 
 
 def get_alias_uuid(alias: str):
@@ -687,3 +704,4 @@ def get_uuid_alias(uuid: UUID):
 
     # Alias not found
     return None
+
