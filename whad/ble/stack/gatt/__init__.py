@@ -15,7 +15,7 @@ from whad.ble.exceptions import HookReturnValue, HookReturnAuthentRequired,\
     HookReturnNotFound, ConnectionLostException
 from whad.ble.stack.att.constants import BleAttOpcode, BleAttErrorCode, ReadAccess, \
     WriteAccess, Authentication, Authorization, Encryption
-from whad.ble.stack.att.exceptions import InsufficientEncryptionError, InsufficientAuthenticationError, InsufficientAuthorizationError, error_response_to_exc, AttErrorCode, AttError
+from whad.ble.stack.att.exceptions import InsufficientEncryptionError, InsufficientAuthenticationError, InsufficientAuthorizationError, ReadNotPermittedError, error_response_to_exc, AttErrorCode, AttError
 from whad.ble.stack.gatt.message import *
 from whad.ble.stack.gatt.exceptions import GattTimeoutException
 from whad.ble.profile import GenericProfile
@@ -866,8 +866,11 @@ class GattClient(GattLayer):
         @return Characteristic descriptor
         @rtype CharacteristicDescriptor
         """
-        # Read descriptor value
-        desc_value = self.read(handle)
+        try:
+            # Read descriptor value
+            desc_value = self.read(handle)
+        except ReadNotPermittedError:
+            desc_value = b''
 
         # Return descriptor object based on value and UUID
         return Descriptor.from_uuid(characteristic, handle,
@@ -964,13 +967,17 @@ class GattClient(GattLayer):
         value=b''
         offset=0
         while True:
-            # Send a ReadBlob request
+            # Send a Read request for first part, then ReadBlob request
+            # for additional parts.
             self.lock_tx()
-            self.att.read_blob_request(handle, offset)
+            if value == b'':
+                self.att.read_request(handle)
+            else:
+                self.att.read_blob_request(handle, offset)
             self.unlock_tx()
 
-            msg = self.wait_for_message(GattReadBlobResponse)
-            if isinstance(msg, GattReadBlobResponse):
+            msg = self.wait_for_message((GattReadResponse, GattReadBlobResponse))
+            if isinstance(msg, (GattReadResponse, GattReadBlobResponse)):
                 if len(msg.value) < (local_mtu - 1):
                     value += msg.value
                     break

@@ -2,6 +2,7 @@ from whad.common.monitors import WhadMonitor
 from scapy.all import conf
 from scapy.layers.bluetooth4LE import *
 from scapy.utils import PcapWriter,PcapReader
+from scapy.error import Scapy_Exception
 from os.path import exists
 from whad.common.pcap import patch_pcap_metadata, extract_pcap_metadata
 from time import time
@@ -26,7 +27,7 @@ class PcapWriterMonitor(WhadMonitor):
         >>> monitor.start()
 
     """
-    def __init__(self, pcap_file, monitor_reception=True, monitor_transmission=True):
+    def __init__(self, pcap_file, monitor_reception=True, monitor_transmission=True, append=True):
         super().__init__(monitor_reception, monitor_transmission)
         self._pcap_file = pcap_file
         self._writer = None
@@ -35,6 +36,7 @@ class PcapWriterMonitor(WhadMonitor):
         self._start_time = None
         self._nb_pkts_written = 0
         self._writer_lock = Lock()
+        self._append = append
 
 
     @property
@@ -57,13 +59,17 @@ class PcapWriterMonitor(WhadMonitor):
             if S_ISFIFO(stat(self._pcap_file).st_mode):
                 logger.info("[i] Named pipe %s detected, syncing.", self._pcap_file)
                 sync = True
+            elif not self._append:
+                logger.info("[i] PCAP file %s exists, overwriting.", self._pcap_file)
+                remove(self._pcap_file)
+                existing_pcap_file = False
             else:
                 # Checks if it is an already existing pcap file.
                 logger.info("[i] PCAP file %s exists, appending new packets.", self._pcap_file)
                 try:
                     # We collect the first packet timestamp to use it as reference time
                     self._start_time = PcapReader(self._pcap_file).read_packet().time * 1000000
-                except EOFError:
+                except (EOFError, Scapy_Exception):
                     # Pcap is empty, remove it and open a new one
                     remove(self._pcap_file)
                     existing_pcap_file = False

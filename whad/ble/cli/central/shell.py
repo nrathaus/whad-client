@@ -446,9 +446,12 @@ class BleCentralShell(InteractiveShell):
         self.__target_bd = None
         if self.__target is not None:
 
-            # detach wireshark
             if self.__wireshark is not None:
+                # Detach wireshark if used
                 self.__wireshark.detach()
+
+                # Consider no wireshark has been launched
+                self.__wireshark = None
 
             self.__target = None
 
@@ -471,9 +474,10 @@ class BleCentralShell(InteractiveShell):
             self.__target.disconnect()
             self.__target_bd = None
 
-            # detach wireshark
+            # detach and close wireshark
             if self.__wireshark is not None:
                 self.__wireshark.detach()
+                self.__wireshark = None
         else:
             self.warning("not connected to a device, aborted.")
 
@@ -729,7 +733,7 @@ class BleCentralShell(InteractiveShell):
             # Perform characteristic read by handle
             if not isinstance(handle, UUID):
                 try:
-                    value = self.__target.read(handle, offset=offset)
+                    value = self.__target.read(handle, offset=offset, long=True)
 
                     if value is not None:
                         # Display result as hexdump
@@ -755,9 +759,9 @@ class BleCentralShell(InteractiveShell):
                     try:
                         # Read data
                         if offset is not None:
-                            value = target_charac.read(offset=offset)
+                            value = target_charac.read(offset=offset, long=True)
                         else:
-                            value = target_charac.read()
+                            value = target_charac.read(long=True)
 
                         # Display result as hexdump
                         hexdump(value)
@@ -1084,7 +1088,7 @@ class BleCentralShell(InteractiveShell):
 
             # If UUID is provided
             if isinstance(handle, UUID):
-                target_charac = self.__target.find_characteristic_by_uuid(handle)
+                target_charac = self.__target.char(handle)
             elif isinstance(handle, int):
                 try:
                     target_charac = self.__target.find_object_by_handle(handle)
@@ -1195,7 +1199,7 @@ class BleCentralShell(InteractiveShell):
 
             # If UUID is provided
             if isinstance(handle, UUID):
-                target_charac = self.__target.find_characteristic_by_uuid(handle)
+                target_charac = self.__target.char(handle)
             elif isinstance(handle, int):
                 try:
                     target_charac = self.__target.find_object_by_handle(handle)

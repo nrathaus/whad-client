@@ -118,9 +118,9 @@ class AdvertisingDevice:
         short_name = None
         for record in self.ad_records:
             if isinstance(record, AdvShortenedLocalName):
-                short_name = record.name.decode('utf-8')
+                short_name = record.name.decode('utf-8', errors='replace')
             elif isinstance(record, AdvCompleteLocalName):
-                complete_name = record.name.decode('utf-8')
+                complete_name = record.name.decode('utf-8', errors='replace')
 
         # Return discovered name (if any)
         if complete_name is not None:
@@ -381,6 +381,8 @@ class AdvertisingDevicesDB:
                     device = self.__db[str(bd_address)]
                     if not device.got_scan_rsp:
                         device.set_scan_rsp(adv_list)
+                        if (filter_addr is not None and filter_addr.lower() == str(bd_address).lower()) or updates:
+                            devices.append(device)
             except AdvDataError:
                 pass
             except AdvDataFieldListOverflow:
